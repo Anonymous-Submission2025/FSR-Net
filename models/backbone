@@ -9,6 +9,8 @@ import os
 import os.path as ospexit
 
 
+import torch
+import torch.nn as nn 
 from torch.autograd import Function
 import triton
 import triton.language as tl
@@ -18,40 +20,53 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-from .DCDM import DCDM 
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+
+# import sys
+# import os
+# sys.path.append(os.path.dirname(__file__))
+
+
+
 
 class Conv2d_BN(torch.nn.Sequential):
     def __init__(self, a, b, ks=1, stride=1, pad=0, dilation=1,
                  groups=1, bn_weight_init=1):
         super().__init__()
-      
+        
         self.add_module('c', torch.nn.Conv2d(
-            a, b, ks, stride, pad, dilation, groups, bias=False))  
+            a, b, ks, stride, pad, dilation, groups, bias=False))  # 不使用偏置
         
         
         self.add_module('bn', torch.nn.BatchNorm2d(b))
         
-        
+       
         torch.nn.init.constant_(self.bn.weight, bn_weight_init)
         
-       
+        
         torch.nn.init.constant_(self.bn.bias, 0)
 
-    @torch.no_grad()  # 禁用梯度计算（推理优化操作）
+    @torch.no_grad()  
     def fuse(self):
         
         c, bn = self._modules.values()
         
-        
+       
         w = bn.weight / (bn.running_var + bn.eps)**0.5
         
+       
         w = c.weight * w[:, None, None, None]
         
-        
+      
         b = bn.bias - bn.running_mean * bn.weight / \
             (bn.running_var + bn.eps)**0.5
         
-     
+        
         m = torch.nn.Conv2d(w.size(1) * self.c.groups, w.size(
             0), w.shape[2:], stride=self.c.stride, padding=self.c.padding, dilation=self.c.dilation, groups=self.c.groups,
             device=c.weight.device)  
@@ -104,13 +119,14 @@ class Residual(torch.nn.Module):
             return x + self.m(x)
 
 class FFN(torch.nn.Module):
-    def __init__(self, ed, h,):        
+    def __init__(self, ed, h,):         
         super().__init__()
         self.pw1 = Conv2d_BN(ed, h)
         self.act = torch.nn.ReLU()
         self.pw2 = Conv2d_BN(h, ed, bn_weight_init=0)
 
     def forward(self, x):
+        
         x = self.pw2(self.act(self.pw1(x)))
         
         return x
@@ -204,6 +220,84 @@ class RepVGGDW(torch.nn.Module):
         return conv
 
 
+class SKA(nn.Module):
+    def __init__(self, in_channels, groups=8, kernel_size=3):
+        super().__init__()
+        self.groups = groups
+        self.kernel_size = kernel_size
+        self.padding = (kernel_size - 1) // 2 
+
+    def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+        ks = self.kernel_size
+        pad = self.padding
+        output = torch.zeros_like(x)
+        
+        for kh in range(ks):
+            for kw in range(ks):
+               
+                hin_start = max(0, kh - pad)
+                hin_end = min(H, H + kh - pad)
+                win_start = max(0, kw - pad)
+                win_end = min(W, W + kw - pad)
+                hin = slice(hin_start, hin_end)
+                win = slice(win_start, win_end)
+                
+               
+                hout_start = max(0, pad - kh)
+                hout_end = min(H, H + pad - kh)
+                wout_start = max(0, pad - kw)
+                wout_end = min(W, W + pad - kw)
+                hout = slice(hout_start, hout_end)
+                wout = slice(wout_start, wout_end)
+                
+                
+                x_slice = x[:, :, hin, win]
+                w_slice = w[:, :, kh * ks + kw, hout, wout]
+                
+                
+                w_expanded = w_slice.repeat_interleave(C // self.groups, dim=1)
+                output[:, :, hout, wout] += x_slice * w_expanded
+        
+        return output
+
+
+class LKP(nn.Module):
+    def __init__(self, dim, lks, sks, groups):
+        super().__init__()
+        self.cv1 = Conv2d_BN(dim, dim // 2)
+        self.act = nn.ReLU()
+        self.cv2 = Conv2d_BN(dim // 2, dim // 2, ks=lks, pad=(lks - 1) // 2, groups=dim // 2)
+        self.cv3 = Conv2d_BN(dim // 2, dim // 2)
+        self.cv4 = nn.Conv2d(dim // 2, sks ** 2 * groups, kernel_size=1)
+        
+        self.norm = nn.GroupNorm(num_groups=groups, num_channels=sks ** 2 * groups)     #
+        
+        self.sks = sks
+        self.groups = groups
+        self.dim = dim
+        
+
+    def forward(self, x):
+        x = self.act(self.cv3(self.cv2(self.act(self.cv1(x)))))
+        w = self.norm(self.cv4(x))
+        b, _, h, w_size = w.size()
+        w = w.view(b, self.groups, self.sks ** 2, h, w_size)
+        return w    
+
+class LSConv(nn.Module):
+    def __init__(self, dim):
+        super(LSConv, self).__init__()
+        self.lkp = LKP(dim, lks=7, sks=3, groups=8)
+        self.ska = SKA(dim)
+        self.bn = nn.BatchNorm2d(dim)
+
+    def forward(self, x):
+        x_lkp=self.lkp(x)           
+        # print(x_lkp.shape)
+        return self.bn(self.ska(x, x_lkp)) + x
+    
+
 
 class enconder1(torch.nn.Module):
     def __init__(self,
@@ -221,35 +315,42 @@ class enconder1(torch.nn.Module):
         
         
         self.DW = RepVGGDW(out_channels)  
-        self.se = SqueezeExcite(out_channels) 
-
+        self.se = SqueezeExcite(out_channels)  
+        
+         
+        
            
-        self.DCDM = DCDM(out_channels) 
+        self.LSConv = LSConv(out_channels)  
 
         
+        
+
+        # 前馈神经网络（带残差连接）
         self.ffn = Residual(
-            FFN(out_channels, out_channels))  
+            FFN(out_channels, out_channels)) 
 
     def forward(self, x):
         # print(x.shape)
-        
+       
         x= self.Stem(x)
         # print("STEM",x.shape)
         x = self.DW(x)  
         # print("DW",x.shape)
         x = self.se(x)    
         # print("SE",x.shape)   
-        x= self.DCDM(x)
-        x = self.ffn(x)  
+        x= self.LSConv(x)
+
+    
+        x = self.ffn(x)   
         
         return x
 
 
 class enconder2_3(torch.nn.Module):
     def __init__(self,
-                 in_channels,  
+                 in_channels, 
                  out_channels,
-                 kd=16,  
+                 kd=16, 
                  nh=8,  
                  ar=4,  
                  resolution=14,  
@@ -257,11 +358,12 @@ class enconder2_3(torch.nn.Module):
         super().__init__()
 
         
-        self.DW = RepVGGDW(out_channels)  
-        self.se = SqueezeExcite(out_channels)   
-        self.DCDM = DCDM(out_channels)  
+        self.DW = RepVGGDW(out_channels) 
+        self.se = SqueezeExcite(out_channels) 
+        self.LSConv = LSConv(out_channels) 
 
         
+      
         self.ffn = Residual(
             FFN(out_channels, out_channels))  
         
@@ -273,14 +375,17 @@ class enconder2_3(torch.nn.Module):
 
     def forward(self, x):
         # print(x.shape)
+        
         x= self.downsample(x)
         # print("STEM",x.shape)
         x = self.DW(x) 
         # print("DW",x.shape)
         x = self.se(x)    
         # print("SE",x.shape)
-        x= self.DCDM(x)
-        x = self.ffn(x)  
+        x= self.LSConv(x)
+        
+
+        x = self.ffn(x)   
         
         return x
 
@@ -289,28 +394,41 @@ class enconder4(torch.nn.Module):
                  in_channels, 
                  out_channels,
                  kd=16,  
-                 nh=8,  
+                 nh=8, 
                  ar=4,  
                  resolution=14,  
                  ):  
         super().__init__()
 
-        self.DW = RepVGGDW(out_channels)  
-        self.se = SqueezeExcite(out_channels) 
+        
+        
+        
+        
+        self.DW = RepVGGDW(out_channels) 
+        self.se = SqueezeExcite(out_channels)  
         self.MHSA = Residual(
                     Attention(out_channels, kd, nh, ar, resolution=resolution)
                 )
 
+        
         self.ffn = Residual(
-            FFN(out_channels, out_channels))  # 两层MLP，中间层扩展为2倍通道
-       
+            FFN(out_channels, out_channels))  
+        
+            # if i != len(depth) - 1:
+            #     blk = blocks[i+1]
+            #     resolution_ = (resolution - 1) // 2 + 1
+            #     blk.append(Conv2d_BN(embed_dim[i], embed_dim[i], ks=3, stride=2, pad=1, groups=embed_dim[i]))
+            #     blk.append(Conv2d_BN(embed_dim[i], embed_dim[i+1], ks=1, stride=1, pad=0))
+            #     resolution = resolution_
+
+        
         self.downsample = torch.nn.Sequential(Conv2d_BN(in_channels, in_channels, 3, 2, 1 ,groups=in_channels) ,
-                                Conv2d_BN(in_channels, out_channels, 1, 1 ,0)  
+                                Conv2d_BN(in_channels, out_channels, 1, 1 ,0)   
                            )
 
     def forward(self, x):
         # print(x.shape)
-        
+       
         x= self.downsample(x)
         # print("STEM",x.shape)
         x = self.DW(x)  
@@ -319,7 +437,7 @@ class enconder4(torch.nn.Module):
         # print("SE",x.shape)
         x= self.MHSA(x)
         # print("MHSA",x.shape)
-        x = self.ffn(x)  
+        x = self.ffn(x)   
         
         return x
 
@@ -329,8 +447,8 @@ class decoder_1_2_3(torch.nn.Module):
     def __init__(self,
                  in_channels,  
                  out_channels,
-                 kd=16,  
-                 nh=8,  
+                 kd=16, 
+                 nh=8, 
                  ar=4,  
                  resolution=14,  
                  ):  
@@ -339,16 +457,18 @@ class decoder_1_2_3(torch.nn.Module):
         
         self.DW = RepVGGDW(out_channels)  
         self.se = SqueezeExcite(out_channels)  
-        self.DCDM = DCDM(out_channels)  
-
+        self.LSConv = LSConv(out_channels)  
+        
+        
         
         self.ffn = Residual(
             FFN(out_channels, out_channels))  
         
 
         self.up = torch.nn.Sequential(nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True) , 
-                                Conv2d_BN(in_channels, out_channels, 1, 1,0) )  
-                               
+                                Conv2d_BN(in_channels, out_channels, 1, 1,0) ) 
+
+        
 
     def forward(self, x):
         # print(x.shape)
@@ -359,8 +479,9 @@ class decoder_1_2_3(torch.nn.Module):
         # print("DW",x.shape)
         x = self.se(x)    
         # print("SE",x.shape)
-        x= self.DCDM(x)
+        x= self.LSConv(x)
         x = self.ffn(x)   
+        
         
         return x
 
@@ -375,23 +496,26 @@ class decoder4(torch.nn.Module):
                  resolution=14,  
                  ):  
         super().__init__()
+
         
+   
         
-        self.DW = RepVGGDW(out_channels)  
-        self.se = SqueezeExcite(out_channels) 
+        self.DW = RepVGGDW(out_channels) 
+        self.se = SqueezeExcite(out_channels)  
         self.MHSA = Residual(
                     Attention(out_channels, kd, nh, ar, resolution=resolution)
                 )
 
-        
+       ）
         self.ffn = Residual(
-            FFN(out_channels, out_channels)) 
-    
-
+            FFN(out_channels, out_channels))  
+        
+            
         
         self.up = torch.nn.Sequential(nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True) , 
                                 Conv2d_BN(in_channels, out_channels, 1, 1,0) )  
         
+         
         
 
     def forward(self, x):
@@ -405,7 +529,7 @@ class decoder4(torch.nn.Module):
         # print("SE",x.shape)
         x= self.MHSA(x)
         # print("MHSA",x.shape)
-        x = self.ffn(x)  
+        x = self.ffn(x)   
         # print("ffn",x.shape)
         
         return x
@@ -413,4 +537,46 @@ class decoder4(torch.nn.Module):
 
 
 
+if __name__ == '__main__':
+    
+    x = torch.randn(1, 256, 16, 16)
+    
+    # embed_dim=[16, 32, 64, 128, 256],
+    decoder4 = decoder4(256, 128)
+    decoder3 = decoder_1_2_3(128, 64)
+    decoder2 = decoder_1_2_3(64, 32)
+    decoder1 = decoder_1_2_3(32, 16)
+    
+    print("x",x.shape)
+    x = decoder4(x)
+    print("decoder4",x.shape)
+    x = decoder3(x)
+    print("decoder3",x.shape)
+    x = decoder2(x)
+    print("decoder2",x.shape)
+    x = decoder1(x)
+    print("decoder1",x.shape)
+
+   
+
+# if __name__ == '__main__':
+    
+#     x = torch.randn(1, 3, 256, 256)
+    
+#     # embed_dim=[128, 256, 384, 512],
+#     encoder1 = enconder1(3, 128)
+#     encoder2 = enconder2_3(128, 256)
+#     encoder3 = enconder2_3(256, 384)
+#     encoder4 = enconder4(384, 512)
+
+
+#     x = encoder1(x)
+#     print("encoder1",x.shape)
+#     x = encoder2(x)
+#     print("encoder2",x.shape)
+#     x = encoder3(x)
+#     print("encoder3",x.shape)
+#     x = encoder4(x)
+#     print("encoder4",x.shape)
+#     # print(model)
 
