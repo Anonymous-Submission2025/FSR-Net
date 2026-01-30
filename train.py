@@ -1,7 +1,7 @@
 import sys
 import os
 from loader import get_loader
-from models.Net import DGL-UNet
+from models.Net import FSR-Net
 
 
 sys.path.append(os.getcwd())
@@ -134,7 +134,7 @@ def main():
     #record log
     logger = get_logger('train', os.path.join(os.getcwd(),args.log,args.datasets))
     #Network
-    model=DGL-UNet(out_channels=args.out_channels,kernel_list=args.kernel_list)
+    model=FSR-Net(out_channels=args.out_channels,kernel_list=args.kernel_list)
     model = model.cuda()
     #loss function
     criterion=BceDiceLoss()
