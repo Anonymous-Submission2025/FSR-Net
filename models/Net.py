@@ -2,9 +2,11 @@ import torch.nn as nn
 
 from .backbone import enconder1,enconder2_3,enconder4
 from .backbone import decoder_1_2_3,decoder4
-
-
-class DGL-UNet(nn.Module):
+from .MPNS import DPFA
+from .RB import RB
+from .SCFA import SCFA
+import models.hotfeat as hotfeat
+class MFS_net(nn.Module):
     def __init__(self,input_channels=3, out_channels:list=None,kernel_list=None):
         super().__init__()
         #encoding
@@ -12,8 +14,6 @@ class DGL-UNet(nn.Module):
         self.en2=enconder2_3(out_channels[1],out_channels[2])
         self.en3=enconder2_3(out_channels[2],out_channels[3])
         self.en4=enconder4(out_channels[3],out_channels[4])
-
-
         #decoding
         self.de1=decoder_1_2_3(out_channels[1],out_channels[0])
         self.de2=decoder_1_2_3(out_channels[2],out_channels[1])
@@ -26,6 +26,14 @@ class DGL-UNet(nn.Module):
             nn.BatchNorm2d(out_channels[0])
         )
 
+        #swin
+        self.swim1 = RB(input_channels=out_channels[1], num_clusters=3) 
+        self.swim2 = RB(input_channels=out_channels[2], num_clusters=3) 
+        self.swim3 = RB(input_channels=out_channels[3], num_clusters=3) 
+
+        self.fusion1 = SCFA(out_channels[1])
+        self.fusion2 = SCFA(out_channels[2])
+        self.fusion3 = SCFA(out_channels[3])
         #prediction
         self.ph=PH(out_channels)
         
@@ -40,16 +48,20 @@ class DGL-UNet(nn.Module):
         e4=self.en4(e3)
 
 
-        #decoding
-        d4=self.de4(e4)
-        d3=self.de3(d4+e3)
-        d2=self.de2(d3+e2)
-        d1=self.de1(d2+e1)
-        
+        #swin
+        e1_freq = self.swim1(e1)
+        e2_freq = self.swim2(e2)
+        e3_freq = self.swim3(e3)
 
+        #decoding
+        d4 = self.de4(e4)
+        d3 = self.de3(self.fusion3(d4, e3_freq)) 
+        d2 = self.de2(self.fusion2(d3, e2_freq))
+        d1 = self.de1(self.fusion1(d2, e1_freq))
+        
+        #prediction
         x_pre=self.ph([d4,d3,d2,d1])
         return x_pre
-
 
 
 class PH_Block(nn.Module):
@@ -84,4 +96,5 @@ class PH(nn.Module):
         x3=self.ph3(x3)
         x4=self.ph4(x4)
         return [x1,x2,x3,x4]
+        return x4
 
