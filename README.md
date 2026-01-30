@@ -1,5 +1,5 @@
 
-<h2 align="center">✨DGL-UNet: A Diagnosis-Guided Lightweight Network with Direction-Aware Convolutions for Medical Image Segmentation</h2>
+<h2 align="center">✨FSR-Net: Frequency-Selective Resonance Learning for Medical Image Segmentation Segmentation</h2>
 
 
 <!-- <p align="center">
@@ -24,13 +24,12 @@
     <img src="asserts/model.png" width="96%" height="96%">
 </div>
 
-**Figure 1. The framework of the proposed DGL-UNet.**
+**Figure 1. The framework of the proposed FSR-Net.**
 
 
-**_Abstract -_** Medical image segmentation remains highly challenging due to the frequent co-occurrence of lesions and anatomical structures, as well as ambiguous and irregular boundaries.This co-occurrence induces severe spatial and semantic entanglement, while conventional convolutions—constrained by fixed geometric kernels—lack the adaptability required to model the irregular contours and fuzzy boundaries inherent in complex pathologies. To overcome these limitations, this study proposes a lightweight diagnosis-inspired visual network to simulate the clinician's triage process. Our framework introduces two key innovations: (1) Dynamic Cognitive Diagnosis Module (DCDM), which adopts a ROI dynamic weight modulation mechanism. This mechanism spatially and adaptively adjusts the dynamic feature weights based on the contextual information unique to the ROI region, thereby achieving targeted enhancement of key lesion features while effectively suppressing the interference response of irrelevant background regions. (2) Direction-Aware Convolution (DAC) module, which learns edge directions through a dynamically rotated kernel group. By adaptively aligning the filter with the irregular contour, DAC significantly improves the boundary representation of fuzzy edges.
-Through extensive experiments on four medical image datasets, it is demonstrated that our method achieves state-of-the-art performance and universality.
+**_Abstract -_** With the widespread application of frequency domain learning in computer vision, frequency-domain-based models have shown significant potential in medical image segmentation. However, existing methods suffer from two key limitations: first, frequency domain processing methods often employ fixed or random initialization, neglecting modality-specific spectral statistics; second, they lack top-down semantic guidance for frequency selection, easily leading to inconsistencies in multi-scale feature representations. To address these challenges, this paper proposes a novel framework called FSR-Net, which incorporates an initialization strategy based on frequency domain statistical priors. The core of this strategy is to mine the spectral basis for specific modalities through K-means clustering of the Fourier spectra of training samples. This strategy provides an anatomically meaningful initialization method, enabling the model to effectively separate low-contrast lesions from noise. Furthermore, we propose a semantically guided cross-frequency attention (SCFA) module. SCFA acts as a bridge, dynamically recalibrating the encoder's frequency band using decoder semantics to ensure that frequency enhancement matches specific anatomical targets. Extensive experiments on four benchmark datasets demonstrate that FSR-Net outperforms state-of-the-art methods and exhibits strong generalization capabilities in complex clinical settings.
 ## Datasets📚
-To verify the performance and general applicability of our DGL-UNet in the field of medical image segmentation, we conducted experiments on four challenging public datasets: ISIC-2018, Kvasir, COVID-19, and Moun-Seg, covering subdivision tasks across four modalities. 
+To verify the performance and general applicability of our FSR-Net in the field of medical image segmentation, we conducted experiments on four challenging public datasets: ISIC-2018, Kvasir, COVID-19, and Moun-Seg, covering subdivision tasks across four modalities. 
 
 | Dataset      | Modality                  | Anatomic Region | Segmentation Target |
 |--------------|---------------------------|-----------------|---------------------|
@@ -50,8 +49,8 @@ To ensure fair comparison, all competing models (including the proposed LSDF-UNe
 ### 1. Install Environment
 
 ```
-conda create -n DGL-UNet python=3.10
-conda activate DGL-UNet
+conda create -n FSR-Net python=3.10
+conda activate FSR-Net
 pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 pip install packaging
 pip install timm
@@ -68,7 +67,7 @@ pip install scikit-learn matplotlib thop h5py SimpleITK scikit-image medpy yacs 
 
 - Folder organization: put datasets into ./data/datasets folder.
 
-### 3. Train the DGL-UNet
+### 3. Train the FSR-Net
 
 ```
 python train.py --datasets ISIC2018
@@ -77,7 +76,7 @@ pre-training file is saved to ./checkpoints/ISIC2018/best.pth
 concrete information see train.py, please
 ```
 
-### 3. Test the DGL-UNet
+### 3. Test the FSR-Net
 
 ```
 python test.py --datasets ISIC2018
